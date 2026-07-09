@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { Camera, Play, Pause, RefreshCw, Sparkles, Eye, X, Volume2 } from "lucide-react";
 
-type VisionState = "focused" | "distracted_phone" | "distracted_away" | "sleepy" | "absent" | "thinking" | "writing" | "reading" | "unknown";
+type VisionState = "focused" | "distracted_phone" | "distracted_away" | "sleepy" | "absent" | "thinking" | "writing" | "reading" | "unknown" | "visitors";
 
 interface Observation {
   state: VisionState;
@@ -162,6 +162,18 @@ const RESPONSE_POOLS: Record<string, string[] | { level1: string[]; level2: stri
       "లాస్ట్ ఇన్ థాట్స్ అహ్? స్టడీ చేద్దాం రా.",
     ],
   },
+  visitors: [
+    "ప్లీజ్ లెట్ నవీన్ స్టడీ... అతను చదువుకోనివ్వండి.",
+    "హే... నవీన్ చదువుతున్నాడు... ప్లీజ్ డిస్టర్బ్ చేయకండి.",
+    "నవీన్ కి స్టడీ టైం... తర్వాత రండి ప్లీజ్.",
+    "గైస్... నవీన్ చదువుకునే టైం ఇది. కాస్త సైలెన్స్ ప్లీజ్.",
+    "నవీన్ ఫోకస్ గా చదువుతున్నాడు... అతన్ని డిస్టర్బ్ చేయకండి.",
+    "అతను చదువుతున్నాడు రా... తర్వాత రండి.",
+    "విజిటర్స్ డిటెక్టెడ్... నవీన్ చదువుకోనివ్వండి ప్లీజ్.",
+    "ప్లీజ్ లెట్ హిమ్ స్టడీ... థాంక్యూ.",
+    "నవీన్ కి ఇప్పుడు స్టడీ టైం... కాస్త సైలెన్స్ ప్లీజ్.",
+    "నవీన్ గదిలో ఎవరున్నారు? అతను చదువుతున్నాడు... ప్లీజ్ డోంట్ డిస్టర్బ్.",
+  ],
 };
 
 const STATE_COOLDOWNS: Record<string, { min: number; max: number }> = {
@@ -171,9 +183,10 @@ const STATE_COOLDOWNS: Record<string, { min: number; max: number }> = {
   sleepy: { min: 120000, max: 180000 },
   absent: { min: 30000, max: 30000 },
   unknown: { min: 60000, max: 90000 },
+  visitors: { min: 30000, max: 60000 },
 };
 
-const DISTRACTION_STATES = new Set(["distracted_phone", "distracted_away", "sleepy", "unknown"]);
+const DISTRACTION_STATES = new Set(["distracted_phone", "distracted_away", "sleepy", "unknown", "visitors"]);
 
 function isFocused(state: VisionState): boolean {
   return state === "focused" || state === "thinking" || state === "writing" || state === "reading";
@@ -230,6 +243,8 @@ export default function VisionSystem({ onDistractionDetected, setEmotion, speakT
   const distractionCountRef = useRef(0);
   const episodeSpeakCountRef = useRef(0);
   const lastStateRef = useRef<VisionState>("focused");
+  const phoneLockRef = useRef(0);
+  const PHONE_LOCK_FRAMES = 2;
 
   // ─── Camera ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -333,22 +348,18 @@ export default function VisionSystem({ onDistractionDetected, setEmotion, speakT
 
   // ─── Decision engine ──────────────────────────────────────────────────
   const shouldSpeak = useCallback((state: VisionState): boolean => {
-    const now = Date.now();
+    if (state === "unknown") return false;
 
     if (state === "absent") {
+      const now = Date.now();
       const cd = getCooldown("absent");
       return (now - (lastSpeakRef.current["absent"] || 0)) >= cd;
     }
 
-    if (isFocused(state)) {
-      const cd = getCooldown("focused");
-      if (now - lastFocusSpeechRef.current < cd) return false;
-      return Math.random() < FOCUS_SPEECH_CHANCE;
-    }
+    if (isFocused(state)) return false;
 
-    const stateStr = DISTRACTION_STATES.has(state) ? state : "unknown";
-    const cd = getCooldown(stateStr);
-    return (now - (lastSpeakRef.current[stateStr] || 0)) >= cd;
+    // Speak on odd-numbered scans (1st, 3rd, 5th...) in same-state streak
+    return distractionCountRef.current % 2 === 1;
   }, []);
 
   // ─── Main scan ───────────────────────────────────────────────────────
@@ -372,7 +383,21 @@ export default function VisionSystem({ onDistractionDetected, setEmotion, speakT
       const data = await res.json();
       setServerStatus("online");
 
-      const state = (data.state || "focused") as VisionState;
+      const rawState = (data.state || "focused") as VisionState;
+      const hasVisitors = (data.events || []).includes("multiple_people");
+      let state = hasVisitors ? "visitors" : rawState;
+
+      // Phone state lock: after phone detected, stay on phone for 2 frames
+      // to prevent moondream hallucinations during phone-to-desk transition
+      if (rawState !== "distracted_phone" && phoneLockRef.current > 0 && lastStateRef.current === "distracted_phone") {
+        phoneLockRef.current--;
+        state = "distracted_phone";
+      } else if (rawState === "distracted_phone") {
+        phoneLockRef.current = PHONE_LOCK_FRAMES;
+      } else {
+        phoneLockRef.current = 0;
+      }
+
       const obs: Observation = {
         state,
         confidence: data.confidence ?? 50,
@@ -390,7 +415,7 @@ export default function VisionSystem({ onDistractionDetected, setEmotion, speakT
       const logStates = historyRef.current.slice(-3).map(o => o.state).join(" → ");
       setLog(`[${new Date().toLocaleTimeString()}] ${state} ${obs.confidence}% · ${displaySession} · ${logStates}`);
 
-      // Track distraction episode
+      // Track consecutive same-state streak for alternating speech pattern
       if (isFocused(state)) {
         distractionCountRef.current = 0;
         episodeSpeakCountRef.current = 0;
@@ -400,6 +425,7 @@ export default function VisionSystem({ onDistractionDetected, setEmotion, speakT
         }
         distractionCountRef.current = lastStateRef.current === state ? distractionCountRef.current + 1 : 1;
       }
+
       lastStateRef.current = state;
 
       if (!shouldSpeak(state)) {
@@ -408,6 +434,7 @@ export default function VisionSystem({ onDistractionDetected, setEmotion, speakT
 
       episodeSpeakCountRef.current++;
       const message = speak(state, episodeSpeakCountRef.current);
+
       setLog(`[${new Date().toLocaleTimeString()}] ${state} ${obs.confidence}% · ${displaySession} · "${message.slice(0, 50)}"`);
 
       // Map state to props callbacks
@@ -416,6 +443,8 @@ export default function VisionSystem({ onDistractionDetected, setEmotion, speakT
         onDistractionDetected("User Absence", message);
       } else if (isFocused(state)) {
         setEmotion("happy");
+      } else if (state === "visitors") {
+        setEmotion("distracted");
       } else if (state === "sleepy") {
         setEmotion("sleepy");
         onDistractionDetected("Yawning / Fatigue", message);

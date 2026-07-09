@@ -377,7 +377,7 @@ app.post("/api/vision/analyze", async (req: Request, res: Response): Promise<voi
       try {
         const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, "");
 
-        const promptText = "Describe the person in this image. What are they doing?";
+        const promptText = "Describe this person and their current activity. What are they doing with their hands? Is anyone else in the frame? What objects are on the desk?";
 
         const ollamaRes = await fetch(`${url}/api/generate`, {
           method: "POST",
@@ -391,56 +391,79 @@ app.post("/api/vision/analyze", async (req: Request, res: Response): Promise<voi
           const text = (rawData.response || "").toLowerCase().trim();
           console.log(`[Moondream] ${text.slice(0, 200)}`);
 
-          // Empty or very short response = moondream didn't understand — treat as focused
-          if (text.length < 10) {
-            console.log("[Moondream] Empty/short response, defaulting to focused");
-            res.json({ state: "focused", confidence: 50, events: ["unclear"] });
+          // Empty/short = model didn't understand — never guess focused
+          if (text.length < 5) {
+            console.log("[Moondream] Too short, returning unknown");
+            res.json({ state: "unknown", confidence: 15, events: ["unclear"] });
             return;
           }
 
           let state = "unknown";
           let events: string[] = [];
-          let confidence = 60;
+          let confidence = 40;
 
-          // Positive-only phone detection: only trigger if description clearly shows active phone use
-          const phoneActive = /(?:holding|using|looking\s+at|checking|scrolling\s+on|typing\s+on|talking\s+on|playing\s+on)\s+(?:a\s+|their\s+|his\s+|her\s+)?(?:phone|cell|mobile|smartphone)\b|\bon\s+(?:a\s+|their\s+|the\s+)?(?:phone|cell|mobile)\b/.test(text);
+          // ── Phone detection with position awareness ──
+          const phone = /\b(?:phone|smartphone|cell\s*phone|mobile)\b/i.test(text);
+          const phoneInUse = phone && (
+            /(?:hold|us(e|ing)|look(?:ing)?\s+at|scroll|typ(e|ing))\s+(?:\w+\s+){0,2}(?:phone|smartphone)/i.test(text) ||
+            /\bon\s+(?:\w+\s+)?(?:phone|smartphone)/i.test(text) ||
+            /(?:phone|smartphone)\s+(?:near|to|close)\s+(?:face|ear)/i.test(text)
+          );
+          const phoneOnDesk = phone && !phoneInUse && /(?:desk|table|surface|sitting|lying|next\s+to|beside)/i.test(text);
 
-          if (phoneActive) {
+          if (phoneInUse) {
             state = "distracted_phone";
             confidence = 85;
+            events = ["phone_in_use"];
+          } else if (phoneOnDesk) {
+            // Phone present but not in use — not a distraction
+            state = "focused";
+            confidence = 70;
+            events = ["phone_on_desk"];
+          } else if (phone) {
+            // Phone mentioned but unclear context — low confidence
+            state = "unknown";
+            confidence = 35;
             events = ["phone_visible"];
-          } else if (text.includes("sleep") || text.includes("eyes closed") || text.includes("asleep") || text.includes("dozing") || text.includes("resting their eyes") || text.includes("head down")) {
+          } else if (text.includes("sleep") || text.includes("eyes closed") || text.includes("asleep") || text.includes("dozing") || text.includes("resting their eyes") || text.includes("yawning") || text.includes("drowsy") || text.includes("sleepy") || text.includes("nodding off") || text.includes("rubbing their eyes")) {
             state = "sleepy";
-            confidence = 90;
-            events = ["eyes_closed"];
-          } else if (text.includes("multiple") || text.includes("two people") || text.includes("another person") || text.includes("someone else") || text.includes("other people") || text.includes("group of")) {
-            state = "distracted_away";
             confidence = 85;
+            events = ["eyes_closed"];
+          } else if (text.includes("two people")) {
+            state = "distracted_away";
+            confidence = 80;
             events = ["multiple_people"];
-          } else if (text.includes("studying") || text.includes("reading") || text.includes("writing") || text.includes("laptop") || text.includes("notebook") || text.includes("book") || text.includes("focused") || text.includes("working") || text.includes("desk") || text.includes("keyboard") || text.includes("computer") || text.includes("typing")) {
-            state = text.includes("reading") ? "reading" : text.includes("writing") ? "writing" : "focused";
+          } else if (text.includes("studying") || text.includes("reading") || text.includes("writing") || text.includes("laptop") || text.includes("notebook") || text.includes("book") || text.includes("focused") || text.includes("working") || text.includes("keyboard") || text.includes("computer") || text.includes("typing") || text.includes("coding") || text.includes("pages") || text.includes("textbook") || text.includes("novel") || text.includes("study") || text.includes("homework") || text.includes("screen") || text.includes("monitor") || text.includes("display")) {
+            state = text.includes("reading") || text.includes("book") || text.includes("pages") || text.includes("textbook") || text.includes("novel") ? "reading" : text.includes("writing") || text.includes("notebook") ? "writing" : "focused";
             confidence = 75;
             events = ["studying_or_working"];
+          } else if (text.includes("looking down") || text.includes("in their lap") || text.includes("in their hands")) {
+            // Looking down could be phone below camera — flag as uncertain distraction
+            state = "unknown";
+            confidence = 45;
+            events = ["looking_down"];
           } else if (text.includes("eating") || text.includes("food") || text.includes("drinking") || text.includes("snack")) {
-            state = "distracted_away";
-            confidence = 70;
-            events = ["eating_or_drinking"];
+            state = "focused";
+            confidence = 60;
+            events = ["eating"];
           } else if (text.includes("talking") || text.includes("speaking") || text.includes("conversation") || text.includes("chatting")) {
             state = "distracted_away";
-            confidence = 75;
+            confidence = 70;
             events = ["talking"];
           } else if (text.includes("looking away") || text.includes("distracted") || text.includes("not looking") || text.includes("staring into space") || text.includes("looking off")) {
             state = "distracted_away";
-            confidence = 65;
+            confidence = 60;
             events = ["looking_away"];
-          } else if (text.includes("person") || text.includes("man") || text.includes("woman") || text.includes("student") || text.includes("individual") || text.includes("someone") || text.includes("naveen")) {
-            state = "focused";
-            confidence = 55;
-            events = ["person_visible"];
           } else {
-            state = "absent";
-            confidence = 50;
-            events = ["no_person_detected"];
+            // Generic person mention or anything else — don't assume focused
+            state = "unknown";
+            confidence = 30;
+            events = ["no_clear_activity"];
+          }
+
+          // If confidence is too low, downgrade to unknown
+          if (state !== "absent" && state !== "sleepy" && state !== "distracted_phone" && confidence < 40) {
+            state = "unknown";
           }
 
           res.json({ state, confidence, events });
@@ -455,7 +478,19 @@ app.post("/api/vision/analyze", async (req: Request, res: Response): Promise<voi
     if (ai) {
       const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, "");
       const imagePart = { inlineData: { mimeType: "image/jpeg", data: base64Data } };
-        const promptText = `You are observing a student studying. Return JSON: {"state":"focused|distracted_phone|distracted_away|sleepy|absent|thinking|writing|reading|unknown","confidence":0-100,"events":["looking_at_screen","phone_visible","etc"]}`;
+        const promptText = `You are observing a student at a desk studying. Analyze the scene and return JSON:
+"state": one of "focused"|"reading"|"writing"|"distracted_phone"|"distracted_away"|"sleepy"|"absent"|"unknown"
+"confidence": 0-100 (how sure you are)
+"events": array of relevant event strings
+
+Rules:
+- Phone in hand / being used → state "distracted_phone", events include "phone_in_use"
+- Phone on desk / table / surface (not being used) → state "focused", events include "phone_on_desk"
+- Multiple people in frame → state "distracted_away", events include "multiple_people"
+- Yawning / eyes closed / head down → state "sleepy", events include "eyes_closed"
+- Studying / reading / writing / laptop / typing → state "focused" (or "reading"/"writing"), events include "studying_or_working"
+- Empty chair / no person → state "absent"
+- Not sure → state "unknown" with low confidence`;
       const response = await ai.models.generateContent({
         model: "gemini-2.0-flash",
         contents: { parts: [imagePart, { text: promptText }] },
@@ -473,6 +508,10 @@ app.post("/api/vision/analyze", async (req: Request, res: Response): Promise<voi
           },
       });
       const result = JSON.parse(response.text || "{}");
+      // Confidence guard: don't guess focused when unsure
+      if (result.confidence < 40 && result.state !== "absent" && result.state !== "sleepy" && result.state !== "distracted_phone") {
+        result.state = "unknown";
+      }
       res.json(result);
       return;
     }
