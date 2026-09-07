@@ -19,7 +19,36 @@ export default function StudyDashboard({ isStudyMode, setIsStudyMode, distractio
   const [activeApp, setActiveApp] = useState("VS Code");
   const [goalsLoading, setGoalsLoading] = useState(true);
   const [pomodoro, setPomodoro] = useState<PomodoroState>({ minutes: 25, seconds: 0, isActive: false, isBreak: false, cyclesCompleted: 0 });
+  const [obsStats, setObsStats] = useState<{ todayFocusPct: number; todayMinutes: number; week: { label: string; pct: number }[] } | null>(null);
   const appList = ["VS Code", "Chrome (Docs)", "Chrome (YouTube)", "Terminal", "Minecraft"];
+
+  useEffect(() => {
+    fetch("/api/vision/observations")
+      .then(r => r.json())
+      .then((data: any[]) => {
+        if (!Array.isArray(data) || data.length === 0) return;
+        const focusedStates = ["focused", "reading", "writing", "thinking"];
+        const now = new Date();
+        const days: Date[] = [];
+        for (let i = 6; i >= 0; i--) { const d = new Date(); d.setDate(now.getDate() - i); days.push(d); }
+        const week = days.map(d => {
+          const key = d.toDateString();
+          const obs = data.filter(o => new Date(o.timestamp).toDateString() === key);
+          const total = Math.max(obs.length, 1);
+          const focus = obs.filter(o => focusedStates.includes(o.state)).length;
+          return { label: d.toLocaleDateString([], { weekday: "short" }), pct: Math.round((focus / total) * 100) };
+        });
+        const todayObs = data.filter(o => new Date(o.timestamp).toDateString() === now.toDateString());
+        const todayTotal = Math.max(todayObs.length, 1);
+        const todayFocus = todayObs.filter(o => focusedStates.includes(o.state)).length;
+        setObsStats({
+          todayFocusPct: Math.round((todayFocus / todayTotal) * 100),
+          todayMinutes: Math.round(todayObs.length * 15 / 60),
+          week,
+        });
+      })
+      .catch(() => {});
+  }, []);
 
   const fetchGoals = () => {
     fetch("/api/goals").then(r => r.json()).then(data => { setGoals(data); setGoalsLoading(false); }).catch(() => setGoalsLoading(false));
@@ -147,6 +176,46 @@ export default function StudyDashboard({ isStudyMode, setIsStudyMode, distractio
               </div>
             </div>
           </div>
+        </div>
+
+        <div className="p-5 rounded-2xl border" style={{ background: "#0f0c08", borderColor: "rgba(245,166,35,0.08)" }}>
+          <p className="flex items-center gap-1.5 mb-3" style={{ fontFamily:"'M PLUS Rounded 1c', sans-serif", fontSize:"11px", fontWeight:700, letterSpacing:"0.06em", textTransform:"uppercase", color:"rgba(155,142,196,0.6)" }}>
+            <Flame className="h-4 w-4" style={{ color: "#f5a623" }} />
+            Focus Streak
+          </p>
+          {obsStats ? (
+            <>
+              <div className="flex items-center justify-between mb-3">
+                <div className="text-center">
+                  <span className="block" style={{ fontFamily:"'M PLUS Rounded 1c', sans-serif", fontSize:"26px", fontWeight:800, color: obsStats.todayFocusPct >= 60 ? "#f5a623" : "#f59e0b" }}>{obsStats.todayFocusPct}%</span>
+                  <span style={{ fontFamily:"'M PLUS Rounded 1c', sans-serif", fontSize:"9px", textTransform:"uppercase", color:"rgba(155,142,196,0.5)" }}>Today's Focus</span>
+                </div>
+                <div className="text-center">
+                  <span className="block" style={{ fontFamily:"'M PLUS Rounded 1c', sans-serif", fontSize:"26px", fontWeight:800, color:"#f0e8d8" }}>{obsStats.todayMinutes}m</span>
+                  <span style={{ fontFamily:"'M PLUS Rounded 1c', sans-serif", fontSize:"9px", textTransform:"uppercase", color:"rgba(155,142,196,0.5)" }}>Focused (est)</span>
+                </div>
+              </div>
+              <div className="grid grid-cols-7 gap-1">
+                {obsStats.week.map((d, i) => (
+                  <div key={i} className="flex flex-col items-center gap-1">
+                    <div className="w-full flex items-end justify-center rounded" style={{ height: 40, background: "rgba(245,166,35,0.04)" }}>
+                      <div style={{
+                        width: "70%",
+                        height: `${Math.max(d.pct, 4)}%`,
+                        borderRadius: 2,
+                        background: d.pct >= 60 ? "rgba(245,166,35,0.7)" : d.pct > 0 ? "rgba(245,158,11,0.6)" : "rgba(155,142,196,0.15)",
+                      }} />
+                    </div>
+                    <span style={{ fontFamily:"'M PLUS Rounded 1c', sans-serif", fontSize:"7px", textTransform:"uppercase", color:"rgba(155,142,196,0.4)" }}>{d.label}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+            <div className="text-center py-6 text-[10px]" style={{ fontFamily:"'M PLUS Rounded 1c', sans-serif", color:"rgba(155,142,196,0.4)" }}>
+              No vision data yet — enable the camera in the Vision tab.
+            </div>
+          )}
         </div>
 
         <div className="p-4 rounded-2xl border" style={{ background: "#0f0c08", borderColor: "rgba(245,166,35,0.08)" }}>
