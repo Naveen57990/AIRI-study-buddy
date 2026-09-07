@@ -591,6 +591,28 @@ export default function VisionSystem({ onDistractionDetected, setEmotion, speakT
       setAnalysisText("");
     } catch {}
   }, []);
+
+  const exportHistory = useCallback(() => {
+    if (persistedObs.length === 0) return;
+    const rows = [
+      ["timestamp", "state", "confidence", "events", "speech"],
+      ...[...persistedObs].reverse().map(o => [
+        new Date(o.timestamp).toISOString(),
+        o.state,
+        String(o.confidence),
+        (o.events || []).join("|"),
+        o.speech || "",
+      ]),
+    ];
+    const csv = rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `airi-session-${new Date().toISOString().split("T")[0]}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [persistedObs]);
   if (minimized) {
     return (
       <div className="fixed bottom-4 right-4 z-50">
@@ -727,6 +749,11 @@ export default function VisionSystem({ onDistractionDetected, setEmotion, speakT
                 className="px-2 py-1 rounded-lg text-[8px] font-mono cursor-pointer"
                 style={{ background: "rgba(245,166,35,0.05)", border: "1px solid rgba(245,166,35,0.08)", color: "rgba(155,142,196,0.5)" }}>
                 Clear
+              </button>
+              <button onClick={exportHistory} disabled={persistedObs.length === 0}
+                className="px-2 py-1 rounded-lg text-[8px] font-mono cursor-pointer"
+                style={{ background: "rgba(245,166,35,0.05)", border: "1px solid rgba(245,166,35,0.08)", color: "rgba(155,142,196,0.5)" }}>
+                Export CSV
               </button>
             </div>
             {analysisText && (
