@@ -285,6 +285,9 @@ export default function VisionSystem({ onDistractionDetected, setEmotion, speakT
   const lastStateRef = useRef<VisionState>("focused");
   const phoneLockRef = useRef(0);
   const PHONE_LOCK_FRAMES = 2;
+  const phoneStreakRef = useRef(0);
+  const lastPhoneEndRef = useRef(0);
+  const PHONE_REPEAT_WINDOW = 10 * 60 * 1000;
 
   const [showHistory, setShowHistory] = useState(false);
   const [persistedObs, setPersistedObs] = useState<Observation[]>([]);
@@ -514,6 +517,14 @@ export default function VisionSystem({ onDistractionDetected, setEmotion, speakT
         distractionCountRef.current = lastStateRef.current === state ? distractionCountRef.current + 1 : 1;
       }
 
+      // Phone repeat escalation: count consecutive phone episodes in a short window
+      if (state === "distracted_phone" && lastStateRef.current !== "distracted_phone") {
+        const gap = Date.now() - lastPhoneEndRef.current;
+        phoneStreakRef.current = (gap > 0 && gap <= PHONE_REPEAT_WINDOW) ? phoneStreakRef.current + 1 : 1;
+      } else if (state !== "distracted_phone" && lastStateRef.current === "distracted_phone") {
+        lastPhoneEndRef.current = Date.now();
+      }
+
       lastStateRef.current = state;
 
       if (!shouldSpeak(state)) {
@@ -522,7 +533,11 @@ export default function VisionSystem({ onDistractionDetected, setEmotion, speakT
       }
 
       episodeSpeakCountRef.current++;
-      const message = speak(state, episodeSpeakCountRef.current);
+      // Repeat-phone escalation: each new phone episode in the window jumps the tone up
+      const effectiveCount = state === "distracted_phone"
+        ? episodeSpeakCountRef.current + (phoneStreakRef.current - 1) * 2
+        : episodeSpeakCountRef.current;
+      const message = speak(state, effectiveCount);
 
       setLog(`[${new Date().toLocaleTimeString()}] ${state} ${obs.confidence}% · ${displaySession} · "${message.slice(0, 50)}"`);
 
