@@ -204,6 +204,45 @@ function randomFrom(arr: string[], exclude: Set<string>): string {
   return pool[Math.floor(Math.random() * pool.length)];
 }
 
+const FOCUSED_STATES = new Set(["focused", "reading", "writing", "thinking"]);
+
+function summarizeObs(obs: Observation[]): { focusPct: number; distractionPct: number; phone: number; sleepy: number; visitors: number; away: number; absent: number } {
+  const total = Math.max(obs.length, 1);
+  let focus = 0, phone = 0, sleepy = 0, visitors = 0, away = 0, absent = 0;
+  for (const o of obs) {
+    if (FOCUSED_STATES.has(o.state)) focus++;
+    else if (o.state === "distracted_phone") phone++;
+    else if (o.state === "sleepy") sleepy++;
+    else if (o.state === "visitors") visitors++;
+    else if (o.state === "distracted_away") away++;
+    else if (o.state === "absent") absent++;
+  }
+  const distraction = phone + sleepy + visitors + away;
+  return {
+    focusPct: Math.round((focus / total) * 100),
+    distractionPct: Math.round((distraction / total) * 100),
+    phone, sleepy, visitors, away, absent,
+  };
+}
+
+function groupByDate(obs: Observation[]): { label: string; items: Observation[] }[] {
+  const groups: { label: string; items: Observation[] }[] = [];
+  const today = new Date();
+  for (const o of [...obs].reverse().slice(0, 100)) {
+    const d = new Date(o.timestamp);
+    let label: string;
+    if (d.toDateString() === today.toDateString()) label = "Today";
+    else {
+      const y = new Date(today); y.setDate(today.getDate() - 1);
+      label = d.toDateString() === y.toDateString() ? "Yesterday" : d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+    }
+    const last = groups[groups.length - 1];
+    if (last && last.label === label) last.items.push(o);
+    else groups.push({ label, items: [o] });
+  }
+  return groups;
+}
+
 function selectResponse(state: string, distractionCount: number, recent: Set<string>): string {
   const pool = RESPONSE_POOLS[state];
   if (!pool) return randomFrom(RESPONSE_POOLS.distracted_away as string[], recent);
@@ -660,50 +699,70 @@ export default function VisionSystem({ onDistractionDetected, setEmotion, speakT
         <span className="ml-auto">{showHistory ? "▲" : "▼"}</span>
       </button>
 
-      {showHistory && (
-        <div className="border-t" style={{ borderColor: "rgba(245,166,35,0.06)", maxHeight: 200, overflow: "auto" }}>
-          <div className="px-3 py-1.5 flex gap-1.5">
-            <button onClick={runAnalysis} disabled={analyzing || persistedObs.length === 0}
-              className="flex items-center gap-1 px-2 py-1 rounded-lg text-[8px] font-mono cursor-pointer"
-              style={{ background: "rgba(245,166,35,0.1)", border: "1px solid rgba(245,166,35,0.2)", color: "#f5a623" }}>
-              <BarChart3 className="h-3 w-3" /> {analyzing ? "Analysing..." : "AI Analysis"}
-            </button>
-            <button onClick={clearHistory}
-              className="px-2 py-1 rounded-lg text-[8px] font-mono cursor-pointer"
-              style={{ background: "rgba(245,166,35,0.05)", border: "1px solid rgba(245,166,35,0.08)", color: "rgba(155,142,196,0.5)" }}>
-              Clear
-            </button>
-          </div>
-          {analysisText && (
-            <div className="px-3 py-1.5 text-[8px] font-mono" style={{ color: "#f5a623", borderTop: "1px solid rgba(245,166,35,0.06)" }}>
-              &gt; {analysisText}
-            </div>
-          )}
-          <div className="px-3 py-1" style={{ maxHeight: 120, overflowY: "auto" }}>
-            {persistedObs.length === 0 ? (
-              <div className="text-[7px] font-mono py-2 text-center" style={{ color: "rgba(155,142,196,0.3)" }}>
-                No observations yet
-              </div>
-            ) : (
-              [...persistedObs].reverse().slice(0, 50).map((o, i) => (
-                <div key={i} className="flex items-center gap-2 py-0.5 text-[7px] font-mono" style={{ color: "rgba(155,142,196,0.6)" }}>
-                  <span style={{ color: "#f5a623", minWidth: 48 }}>{new Date(o.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                  <span className="px-1 rounded" style={{
-                    background: o.state === "focused" || o.state === "reading" || o.state === "writing" ? "rgba(34,197,94,0.15)" :
-                      o.state === "distracted_phone" || o.state === "distracted_away" || o.state === "visitors" ? "rgba(245,166,35,0.15)" :
-                      o.state === "sleepy" ? "rgba(99,102,241,0.15)" : "rgba(155,142,196,0.1)",
-                    color: o.state === "focused" || o.state === "reading" || o.state === "writing" ? "#22c55e" :
-                      o.state === "distracted_phone" || o.state === "distracted_away" || o.state === "visitors" ? "#f5a623" :
-                      o.state === "sleepy" ? "#6366f1" : "rgba(155,142,196,0.5)",
-                  }}>{o.state}</span>
-                  <span>{o.confidence}%</span>
-                  {o.speech && <span className="truncate" style={{ maxWidth: 100, color: "rgba(245,166,35,0.4)" }}>🗣️ {o.speech.slice(0, 30)}</span>}
+      {showHistory && (() => {
+        const summary = summarizeObs(persistedObs);
+        const dateGroups = groupByDate(persistedObs);
+        return (
+          <div className="border-t" style={{ borderColor: "rgba(245,166,35,0.06)", maxHeight: 260, overflow: "auto" }}>
+            {/* Summary stats */}
+            {persistedObs.length > 0 && (
+              <div className="px-3 py-2 border-b" style={{ borderColor: "rgba(245,166,35,0.06)" }}>
+                <div className="text-[8px] font-mono mb-1" style={{ color: "rgba(155,142,196,0.5)" }}>FOCUS {summary.focusPct}% · DISTRACTED {summary.distractionPct}%</div>
+                <div className="flex gap-2 text-[7px] font-mono">
+                  <span className="px-1.5 py-0.5 rounded" style={{ background: "rgba(34,197,94,0.12)", color: "#22c55e" }}>🎯 {summary.focusPct}%</span>
+                  <span className="px-1.5 py-0.5 rounded" style={{ background: "rgba(245,166,35,0.12)", color: "#f5a623" }}>📱 {summary.phone}x</span>
+                  <span className="px-1.5 py-0.5 rounded" style={{ background: "rgba(99,102,241,0.12)", color: "#818cf8" }}>💤 {summary.sleepy}x</span>
+                  <span className="px-1.5 py-0.5 rounded" style={{ background: "rgba(155,142,196,0.12)", color: "#a78bfa" }}>👥 {summary.visitors}x</span>
+                  <span className="px-1.5 py-0.5 rounded" style={{ background: "rgba(245,158,11,0.12)", color: "#f59e0b" }}>🚪 {summary.absent}x</span>
                 </div>
-              ))
+              </div>
             )}
+            <div className="px-3 py-1.5 flex gap-1.5">
+              <button onClick={runAnalysis} disabled={analyzing || persistedObs.length === 0}
+                className="flex items-center gap-1 px-2 py-1 rounded-lg text-[8px] font-mono cursor-pointer"
+                style={{ background: "rgba(245,166,35,0.1)", border: "1px solid rgba(245,166,35,0.2)", color: "#f5a623" }}>
+                <BarChart3 className="h-3 w-3" /> {analyzing ? "Analysing..." : "AI Analysis"}
+              </button>
+              <button onClick={clearHistory}
+                className="px-2 py-1 rounded-lg text-[8px] font-mono cursor-pointer"
+                style={{ background: "rgba(245,166,35,0.05)", border: "1px solid rgba(245,166,35,0.08)", color: "rgba(155,142,196,0.5)" }}>
+                Clear
+              </button>
+            </div>
+            {analysisText && (
+              <div className="px-3 py-1.5 text-[8px] font-mono" style={{ color: "#f5a623", borderTop: "1px solid rgba(245,166,35,0.06)" }}>
+                &gt; {analysisText}
+              </div>
+            )}
+            <div className="px-3 py-1" style={{ maxHeight: 120, overflowY: "auto" }}>
+              {persistedObs.length === 0 ? (
+                <div className="text-[7px] font-mono py-2 text-center" style={{ color: "rgba(155,142,196,0.3)" }}>
+                  No observations yet
+                </div>
+              ) : dateGroups.map((g, gi) => (
+                <div key={gi}>
+                  <div className="text-[7px] font-mono py-0.5 mt-1" style={{ color: "rgba(155,142,196,0.35)" }}>── {g.label} · {g.items.length} scans ──</div>
+                  {g.items.map((o, i) => (
+                    <div key={i} className="flex items-center gap-2 py-0.5 text-[7px] font-mono" style={{ color: "rgba(155,142,196,0.6)" }}>
+                      <span style={{ color: "#f5a623", minWidth: 48 }}>{new Date(o.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                      <span className="px-1 rounded" style={{
+                        background: FOCUSED_STATES.has(o.state) ? "rgba(34,197,94,0.15)" :
+                          o.state === "distracted_phone" || o.state === "distracted_away" || o.state === "visitors" ? "rgba(245,166,35,0.15)" :
+                          o.state === "sleepy" ? "rgba(99,102,241,0.15)" : "rgba(155,142,196,0.1)",
+                        color: FOCUSED_STATES.has(o.state) ? "#22c55e" :
+                          o.state === "distracted_phone" || o.state === "distracted_away" || o.state === "visitors" ? "#f5a623" :
+                          o.state === "sleepy" ? "#6366f1" : "rgba(155,142,196,0.5)",
+                      }}>{o.state}</span>
+                      <span>{o.confidence}%</span>
+                      {o.speech && <span className="truncate" style={{ maxWidth: 100, color: "rgba(245,166,35,0.4)" }}>🗣️ {o.speech.slice(0, 30)}</span>}
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }
