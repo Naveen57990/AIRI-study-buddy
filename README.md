@@ -82,11 +82,12 @@ npm run dev:all
 
 *(Alternatively run `npm run server` and `npm run dev` in two terminals.)*
 
-To run the production build instead of the Vite dev server:
+### Run in production (single command)
+Builds the frontend and serves everything — app + API — on one port:
 ```bash
-npm run build
-NODE_ENV=production npm run server   # serves dist/ on :3000
+npm start
 ```
+Open **http://localhost:3000**. No Vite dev server needed.
 
 ---
 

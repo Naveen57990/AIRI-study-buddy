@@ -7,7 +7,8 @@
     "build": "vite build",
     "dev": "vite",
     "server": "tsx server.ts",
-    "dev:all": "concurrently \"npm run server\" \"npm run dev\""
+    "dev:all": "concurrently \"npm run server\" \"npm run dev\"",
+    "start": "vite build && NODE_ENV=production tsx server.ts"
   },
   "dependencies": {
     "@emotion/react": "11.14.0",
