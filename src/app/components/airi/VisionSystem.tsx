@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { Camera, Play, Pause, RefreshCw, Sparkles, Eye, X, Volume2 } from "lucide-react";
+import { Camera, Play, Pause, RefreshCw, Sparkles, Eye, X, Volume2, Clock, BarChart3 } from "lucide-react";
 
 type VisionState = "focused" | "distracted_phone" | "distracted_away" | "sleepy" | "absent" | "thinking" | "writing" | "reading" | "unknown" | "visitors";
 
@@ -8,6 +8,7 @@ interface Observation {
   confidence: number;
   events: string[];
   timestamp: number;
+  speech?: string;
 }
 
 interface VisionSystemProps {
@@ -246,6 +247,29 @@ export default function VisionSystem({ onDistractionDetected, setEmotion, speakT
   const phoneLockRef = useRef(0);
   const PHONE_LOCK_FRAMES = 2;
 
+  const [showHistory, setShowHistory] = useState(false);
+  const [persistedObs, setPersistedObs] = useState<Observation[]>([]);
+  const [analysisText, setAnalysisText] = useState("");
+  const [analyzing, setAnalyzing] = useState(false);
+
+  // ─── Load persisted observations on mount ──────────────────────────
+  useEffect(() => {
+    fetch("/api/vision/observations")
+      .then(r => r.json())
+      .then(data => {
+        if (Array.isArray(data)) {
+          setPersistedObs(data.map((o: any) => ({
+            state: o.state as VisionState,
+            confidence: o.confidence,
+            events: o.events || [],
+            timestamp: new Date(o.timestamp).getTime(),
+            speech: o.speech,
+          })));
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   // ─── Camera ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (!capturing) {
@@ -363,6 +387,31 @@ export default function VisionSystem({ onDistractionDetected, setEmotion, speakT
   }, []);
 
   // ─── Main scan ───────────────────────────────────────────────────────
+  const persistObservation = useCallback(async (state: string, confidence: number, events: string[], speech: string) => {
+    const obs = {
+      state,
+      confidence,
+      events,
+      timestamp: new Date().toISOString(),
+      speech: speech || undefined,
+    };
+    try {
+      const res = await fetch("/api/vision/observations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(obs),
+      });
+      if (res.ok) {
+        setPersistedObs(prev => [...prev, {
+          state: state as VisionState,
+          confidence,
+          events,
+          timestamp: Date.now(),
+          speech: speech || undefined,
+        }].slice(-300));
+      }
+    } catch {} // silently fail
+  }, []);
   const scan = useCallback(async () => {
     if (analyzingRef.current || !videoRef.current || videoRef.current.readyState < 2) return;
     analyzingRef.current = true;
@@ -429,6 +478,7 @@ export default function VisionSystem({ onDistractionDetected, setEmotion, speakT
       lastStateRef.current = state;
 
       if (!shouldSpeak(state)) {
+        persistObservation(obs.state, obs.confidence, obs.events, "");
         setBusy(false); analyzingRef.current = false; return;
       }
 
@@ -455,6 +505,9 @@ export default function VisionSystem({ onDistractionDetected, setEmotion, speakT
         setEmotion("distracted");
         onDistractionDetected("Social Media / Game", message);
       }
+
+      // Persist observation with speech to server
+      persistObservation(obs.state, obs.confidence, obs.events, message);
     } catch {
       setServerStatus("offline");
       setLog(`[${new Date().toLocaleTimeString()}] server unavailable`);
@@ -462,7 +515,7 @@ export default function VisionSystem({ onDistractionDetected, setEmotion, speakT
 
     setBusy(false);
     analyzingRef.current = false;
-  }, [trackFocused, formatSessionTime, setEmotion, onDistractionDetected, enqueueSpeech, speak, shouldSpeak, speak]);
+  }, [trackFocused, formatSessionTime, setEmotion, onDistractionDetected, enqueueSpeech, speak, shouldSpeak, persistObservation]);
 
   useEffect(() => { if (auto && capturing && camState === "granted") {
     scan();
@@ -475,6 +528,30 @@ export default function VisionSystem({ onDistractionDetected, setEmotion, speakT
   }, [enqueueSpeech]);
 
   // ─── Render ──────────────────────────────────────────────────────────
+  const runAnalysis = useCallback(async () => {
+    setAnalyzing(true);
+    setAnalysisText("");
+    try {
+      const res = await fetch("/api/vision/analysis", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ observations: persistedObs.slice(-100) }),
+      });
+      const data = await res.json();
+      setAnalysisText(data.summary || "No analysis available.");
+    } catch {
+      setAnalysisText("Analysis failed. Is the server running?");
+    }
+    setAnalyzing(false);
+  }, [persistedObs]);
+
+  const clearHistory = useCallback(async () => {
+    try {
+      await fetch("/api/vision/observations", { method: "DELETE" });
+      setPersistedObs([]);
+      setAnalysisText("");
+    } catch {}
+  }, []);
   if (minimized) {
     return (
       <div className="fixed bottom-4 right-4 z-50">
@@ -573,6 +650,60 @@ export default function VisionSystem({ onDistractionDetected, setEmotion, speakT
           <Volume2 className="h-3 w-3" /> <span>TEST</span>
         </button>
       </div>
+
+      {/* Session History Toggle */}
+      <button onClick={() => setShowHistory(!showHistory)}
+        className="flex items-center gap-1.5 px-3 py-1.5 w-full text-[8px] font-mono cursor-pointer border-t"
+        style={{ background: "rgba(245,166,35,0.03)", borderColor: "rgba(245,166,35,0.06)", color: "rgba(155,142,196,0.5)" }}>
+        <Clock className="h-3 w-3" />
+        <span>Session History ({persistedObs.length})</span>
+        <span className="ml-auto">{showHistory ? "▲" : "▼"}</span>
+      </button>
+
+      {showHistory && (
+        <div className="border-t" style={{ borderColor: "rgba(245,166,35,0.06)", maxHeight: 200, overflow: "auto" }}>
+          <div className="px-3 py-1.5 flex gap-1.5">
+            <button onClick={runAnalysis} disabled={analyzing || persistedObs.length === 0}
+              className="flex items-center gap-1 px-2 py-1 rounded-lg text-[8px] font-mono cursor-pointer"
+              style={{ background: "rgba(245,166,35,0.1)", border: "1px solid rgba(245,166,35,0.2)", color: "#f5a623" }}>
+              <BarChart3 className="h-3 w-3" /> {analyzing ? "Analysing..." : "AI Analysis"}
+            </button>
+            <button onClick={clearHistory}
+              className="px-2 py-1 rounded-lg text-[8px] font-mono cursor-pointer"
+              style={{ background: "rgba(245,166,35,0.05)", border: "1px solid rgba(245,166,35,0.08)", color: "rgba(155,142,196,0.5)" }}>
+              Clear
+            </button>
+          </div>
+          {analysisText && (
+            <div className="px-3 py-1.5 text-[8px] font-mono" style={{ color: "#f5a623", borderTop: "1px solid rgba(245,166,35,0.06)" }}>
+              &gt; {analysisText}
+            </div>
+          )}
+          <div className="px-3 py-1" style={{ maxHeight: 120, overflowY: "auto" }}>
+            {persistedObs.length === 0 ? (
+              <div className="text-[7px] font-mono py-2 text-center" style={{ color: "rgba(155,142,196,0.3)" }}>
+                No observations yet
+              </div>
+            ) : (
+              [...persistedObs].reverse().slice(0, 50).map((o, i) => (
+                <div key={i} className="flex items-center gap-2 py-0.5 text-[7px] font-mono" style={{ color: "rgba(155,142,196,0.6)" }}>
+                  <span style={{ color: "#f5a623", minWidth: 48 }}>{new Date(o.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                  <span className="px-1 rounded" style={{
+                    background: o.state === "focused" || o.state === "reading" || o.state === "writing" ? "rgba(34,197,94,0.15)" :
+                      o.state === "distracted_phone" || o.state === "distracted_away" || o.state === "visitors" ? "rgba(245,166,35,0.15)" :
+                      o.state === "sleepy" ? "rgba(99,102,241,0.15)" : "rgba(155,142,196,0.1)",
+                    color: o.state === "focused" || o.state === "reading" || o.state === "writing" ? "#22c55e" :
+                      o.state === "distracted_phone" || o.state === "distracted_away" || o.state === "visitors" ? "#f5a623" :
+                      o.state === "sleepy" ? "#6366f1" : "rgba(155,142,196,0.5)",
+                  }}>{o.state}</span>
+                  <span>{o.confidence}%</span>
+                  {o.speech && <span className="truncate" style={{ maxWidth: 100, color: "rgba(245,166,35,0.4)" }}>🗣️ {o.speech.slice(0, 30)}</span>}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

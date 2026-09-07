@@ -77,6 +77,14 @@ interface Store {
     xpHistory: Array<{ amount: number; reason: string; source: string; timestamp: string }>;
     dailyUsage: { date: string; petted: number; praised: number; chatCount: number };
   };
+  visionObservations: Array<{
+    id: string;
+    timestamp: string;
+    state: string;
+    confidence: number;
+    events: string[];
+    speech?: string;
+  }>;
 }
 
 let store: Store = loadStore();
@@ -100,6 +108,7 @@ function loadStore(): Store {
       if (!raw.journal) raw.journal = {};
       if (!raw.pdfHistory) raw.pdfHistory = [];
       if (!raw.chatHistory) raw.chatHistory = [];
+      if (!raw.visionObservations) raw.visionObservations = [];
       return raw;
     }
   } catch (e) {
@@ -135,6 +144,7 @@ function loadStore(): Store {
     pdfHistory: [],
     chatHistory: [],
     affection: { level: 1, xp: 0, totalXp: 0, unlocks: [], lastLoginDate: null, currentStreak: 0, longestStreak: 0, xpHistory: [], dailyUsage: { date: "", petted: 0, praised: 0, chatCount: 0 } },
+    visionObservations: [],
   };
 }
 
@@ -429,7 +439,7 @@ app.post("/api/vision/analyze", async (req: Request, res: Response): Promise<voi
             state = "sleepy";
             confidence = 85;
             events = ["eyes_closed"];
-          } else if (text.includes("two people")) {
+          } else if (text.includes("two people") || text.includes("2 people") || text.includes("two individuals") || text.includes("second person") || text.includes("two men") || text.includes("two other people") || text.includes("another person")) {
             state = "distracted_away";
             confidence = 80;
             events = ["multiple_people"];
@@ -933,6 +943,78 @@ app.post("/api/calendar/journal/:date", (req: Request, res: Response) => {
   store.journal[req.params.date] = req.body;
   saveStore();
   res.json({ ok: true });
+});
+
+// ─── Vision Observations ─────────────────────────────────────────────────────
+app.get("/api/vision/observations", (_req: Request, res: Response) => {
+  res.json(store.visionObservations || []);
+});
+
+app.post("/api/vision/observations", (req: Request, res: Response) => {
+  const { observations } = req.body;
+  if (Array.isArray(observations)) {
+    store.visionObservations = observations;
+  } else {
+    const obs = {
+      id: Date.now().toString(),
+      timestamp: new Date().toISOString(),
+      ...req.body,
+    };
+    store.visionObservations.push(obs);
+    if (store.visionObservations.length > 500) store.visionObservations = store.visionObservations.slice(-500);
+  }
+  saveStore();
+  res.json({ ok: true });
+});
+
+app.delete("/api/vision/observations", (_req: Request, res: Response) => {
+  store.visionObservations = [];
+  saveStore();
+  res.json({ ok: true });
+});
+
+// ─── AI Session Analysis ──────────────────────────────────────────────────────
+app.post("/api/vision/analysis", async (req: Request, res: Response) => {
+  try {
+    const { observations } = req.body;
+    if (!Array.isArray(observations) || observations.length === 0) {
+      res.json({ summary: "No observations to analyze." });
+      return;
+    }
+
+    const states = observations.map((o: any) => o.state);
+    const stateCounts: Record<string, number> = {};
+    for (const s of states) {
+      stateCounts[s] = (stateCounts[s] || 0) + 1;
+    }
+    const total = observations.length;
+    const focusedStates = ["focused", "reading", "writing", "thinking"];
+    const distractedStates = ["distracted_phone", "distracted_away", "sleepy", "unknown", "visitors"];
+    const focusPct = Math.round((states.filter((s: string) => focusedStates.includes(s)).length / total) * 100);
+    const distractionPct = Math.round((states.filter((s: string) => distractedStates.includes(s)).length / total) * 100);
+    const absentPct = Math.round((states.filter((s: string) => s === "absent").length / total) * 100);
+    const phoneCount = states.filter((s: string) => s === "distracted_phone").length;
+    const sleepyCount = states.filter((s: string) => s === "sleepy").length;
+    const visitorCount = states.filter((s: string) => s === "visitors").length;
+
+    const period = total * 15;
+    const minutes = Math.round(period / 60);
+    const seconds = period % 60;
+
+    const summary = `Session ran for ${minutes}m ${seconds}s (${total} scans). ` +
+      `Focused ${focusPct}% · Distracted ${distractionPct}% · Absent ${absentPct}%` +
+      (phoneCount ? ` · Phone ${phoneCount}x` : "") +
+      (sleepyCount ? ` · Sleepy ${sleepyCount}x` : "") +
+      (visitorCount ? ` · Visitors ${visitorCount}x` : "") + ". " +
+      (focusPct >= 80 ? "Great focus! Keep it up." :
+       focusPct >= 50 ? "Moderate focus — try to minimize distractions." :
+       "Low focus — consider taking a break and resetting.");
+
+    res.json({ summary, stats: { total, focusPct, distractionPct, absentPct, phoneCount, sleepyCount, visitorCount, minutes, seconds } });
+  } catch (e) {
+    console.error("Analysis error:", e);
+    res.status(500).json({ summary: "Analysis failed." });
+  }
 });
 
 // ─── Serve static files in production ──────────────────────────────────────────
